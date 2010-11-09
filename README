@@ -1,0 +1,61 @@
++----------------------------------------------+
+|  carbfw6 version 0.1                         |
+|              by CarbonLifeform@psych0tik.net |
++----------------------------------------------+
+
+1. Purpose
+   This script was started to generate ip6tables rules for hosts and the current
+   release more or less supports this. However there is a section that controls 
+   routing and this is mainly for the purpose of handling minor forwarding 
+   filtering with regards to virtual machines and filtering the routes between 
+   their private networks.
+
+2. Configuration & Defaults
+   Currently the script uses variables at the beginning of the script to control
+   it's behavior. Editing of these variables changes sections of the resulting
+   rules. 
+
+   2.1 Control variables
+   These variables enable and disable different code blocks. They can be set as
+   on with the value of "1", any other value disables them. 
+    * flush - enables a code block to remove the current iptables rules and
+    tables.
+    * mobile - enables rules to allow the transit of Mobile IPv6 related ICMP
+    packets
+    * backup - enables code to backup your current ip6tables rules, restorable
+    with ip6tables-restore <filename>
+    * r_enable - enables the iptables that go into the FORWARD table
+    * r_stateful - enables a rule to statefully allow returning packets
+
+   2.2 Host variables
+   These variables influence and provide data and settings for various parts of
+   the host oriented ip6tables rule generation. These sections describe what 
+   format the script will expect in the variable.
+    * backup_file - variable sets the location of the ip6tables-save output
+    * ip6t - the variable that stores the ip6tables location/flags/command
+    * localPrefix - An array that stores all the network prefixes you would
+    consider to be local and implicitly trusted 
+    * internetPrefix - an array storing public prefixes so that packets sourced
+    from these IPs can be considered local as well
+    * localPorts - ports to accept from hosts in the networks specified in the
+    previous two variables. The ports are specified in the /etc/services
+    standard of <port number>/<transport protocol> and seperated by spaces.
+    * publicPorts - ports to accept from the big wide internets. 
+
+   2.3 Routing variables
+   These variables control various behaviors within the routing rules generation
+   subsystem. 
+   * r_blockPorts - specifies ports to block while crossing the FORWARD table
+   using the /etc/services format specified in earlier configuration parameters
+   * r_interf - specifies directional allowed transit paths between interfaces
+   while crossing the FORWARD table. Combinations are specified by a custom
+   standard of [source interface]>[destination interface] and seperated by
+   spaces. If r_stateful is enabled packets can return to their source network
+   without an explicitly specified return path in this section.
+
+3. Development
+   Please bear in mind this is an early development release. If you find any
+   bugs, have any ideas, or have coded any features, please send them back to
+   the maintainer. This script may also see major changes in the future;
+   backwards compatability is likely to be a rare luxury. 
+   The current maintainer of this script is CarbonLifeForm<at>psych0tik.net
