@@ -28,6 +28,8 @@ declare -a internetPrefix=() #list of internet route-able prefixes
 ## Constants
 declare -r regex_port="^[[:digit:]]{1,5}\/[[:alnum:]]{2,10}$" #regex for verifying the port/proto pairs in the xxxPorts variables
 declare -r regex_route="^[[:alnum:]]{2,}>[[:alnum:]]{2,}$" #regex for verifying the port/proto pairs in the xxxPorts variables
+declare version="v0.1"
+declare reldate="2010-11-11" 
 
 ## Ports to permit through the firewall
 # Local ports 
@@ -41,6 +43,29 @@ declare r_blockPorts="139/udp 139/tcp 445/tcp 445/udp" #list of ports to block i
 declare -a r_interf="vmnet5>eth0 vmnet4>vmnet5 vmnet5>vmnet4" #permitted routing paths, see next comments
 #routing path pairs are specified in a 'src_if'>'dest_if'
 #with stateful firewalling this will result in packets being allowed back only if related ones have already left
+
+function PrintUsage() {
+	local uline="usage: carbfw [-h]\n\n"
+	local ublurb="    h : Print usage help\n"
+	printf "CarbFW6 %s %s\n\n" "$version" "$reldate"
+	printf "$uline"
+	printf "$ublurb"
+}
+
+## Flag parsing
+# Using the standard getopts function available in both bash and ash.
+while getopts "h" getoptsflag
+do
+	case $getoptsflag in
+		h) 	PrintUsage
+			exit 0
+			;;
+		?)	printf "Error: unknown option %s\n\n" $getoptsflag
+			PrintUsage
+			exit 2
+			;;
+	esac
+done
 
 ##
 #  INPUT
@@ -281,3 +306,4 @@ then
 #        systrl -e "net.ipv6.conf.$intf.forwarding"="1"
 #    }
 fi
+
