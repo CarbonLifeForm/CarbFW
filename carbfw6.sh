@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 ####
 # Because I want to be running a classic IPv6 network, I'm going to have to do 
@@ -16,56 +16,215 @@
 #**********
 
 ## Main Variables
-declare flush="1" #removes all rules from the tables
-declare mobile="0" #enables rules that allow mobile IPv6 ICMP configuration packets NOT IMPLEMENTED
-declare backup="1" #enables a dump to file "iptables.bak" restorable by usage of iptables-restore
-#declare backup_file="carbfw-backup-$(date +%s).bak" #filename for ip6tables-backup with seconds since epoch for uniqueness
-declare backup_file #filename for ip6tables-backup with seconds since epoch for uniqueness
-declare ip6t="/sbin/ip6tables" #location and flags of ip6tables binary
-declare -a localPrefix=(fe80::/10 fdb6:dead:babe::/48) #list of internal network prefixes
-declare -a internetPrefix=() #list of internet route-able prefixes
+flush="1" #removes all rules from the tables
+mobile="0" #enables rules that allow mobile IPv6 ICMP configuration packets NOT IMPLEMENTED
+backup_flg="" #enables a dump to file restorable by usage of iptables-restore
+backup_set="" #enables a dump to file 
+validTargets="DROP ACCEPT" 
+#backup_file="carbfw-backup-$(date +%s).bak" #filename for ip6tables-backup with seconds since epoch for uniqueness
+ip6t="/sbin/ip6tables" #location and flags of ip6tables binary
+localPrefix="fe80::/10 fdb6:dead:babe::/48" #list of internal network prefixes
+internetPrefix= #list of internet route-able prefixes
+rulefile="4" ## unless this gives us issues i'm just going to stick with 4
+configloaded=0 # only when this variable is set does the rule processing loop start
 
 ## Constants
-declare -r regex_port="^[[:digit:]]{1,5}\/[[:alnum:]]{2,10}$" #regex for verifying the port/proto pairs in the xxxPorts variables
-declare -r regex_route="^[[:alnum:]]{2,}>[[:alnum:]]{2,}$" #regex for verifying the port/proto pairs in the xxxPorts variables
-declare version="v0.1"
-declare reldate="2010-11-11" 
-
-## Ports to permit through the firewall
-# Local ports 
-declare -a localPorts=(137/tcp 138/tcp 139/tcp 443/tcp 137/udp 138/udp 139/udp 443/udp) #permitted ports from local IPs
-declare -a publicPorts=(80/tcp 443/tcp) #permitted ports from all IPs
+version="v0.1"
+reldate="2010-11-11" 
 
 ## Routing variables
-declare r_enable="1" #enables generation of routing rules
-declare r_stateful="1" #enables state firewall rule
-declare r_blockPorts="139/udp 139/tcp 445/tcp 445/udp" #list of ports to block in the usual port/proto format 
-declare -a r_interf="vmnet5>eth0 vmnet4>vmnet5 vmnet5>vmnet4" #permitted routing paths, see next comments
-#routing path pairs are specified in a 'src_if'>'dest_if'
-#with stateful firewalling this will result in packets being allowed back only if related ones have already left
+r_enable="1" #enables generation of routing rules
 
-function PrintUsage() {
-	local uline="usage: carbfw [-h]\n\n"
-	local ublurb="    h : Print usage help\n"
+## Functions
+#Lowercase: converts all uppercase characters to lowercase
+Lowercase () {
+    echo "$@" | tr '[:upper:]' '[:lower:]'
+}
+
+#Uppercase: conversts all lowercase characters to uppercase
+Uppercase () {
+    echo "$@" | tr '[:lower:]' '[:upper:]' 
+}
+
+#CleanString: Remove any character that is not a letter or a number
+CleanString () {
+    echo "$@" | tr -c '[:alnum:]' '' 
+}
+
+#CheckFor: checks to see if the second parameter is included in a space separated list in the first parameter
+CheckFor () {
+    if [ -n $2 ] ; then ErrQuit "!!! CheckFor() requires two parameters !!!" fi
+    for checkfor1 in $1
+    do
+        if [ "$checkfor1" = "$2" ]; 
+        then
+            return 0;
+        fi
+    done
+    return 1;
+}
+
+#PrintUsage: the everpresent usage output
+PrintUsage() {
+	uline="usage: carbfw [-h]\n\n"
+	ublurb="    h : Print usage help\n"
+    ublurb=${blurb} + "    b : enable backing up of files\n"
+    ublurb=${blurb} + "    f <file> : specify rules file\n"
 	printf "CarbFW6 %s %s\n\n" "$version" "$reldate"
 	printf "$uline"
 	printf "$ublurb"
 }
 
+#ErrQuit: print error message, then quit in a fit.
+ErrQuit() {
+   printf "$1\n" >&2
+   exit $2
+}
+
+#ErrCont: print error message, carry on with life
+ErrCont() {
+    printf "$1\n" >&2
+}
+
+#FlushTable: flush all chains in the default table or the table specified in $1
+FlushTable() {
+    ## Flush
+    #Clean out the tables
+    if [ "$1" != "" ]; then
+        t="-t $1" 
+    fi
+    $ip6t $t -F
+    $ip6t $t -X
+}
+
+#Backup: stores all rules to a specified place since this script is destructive
+Backup () {
+	#This line of saving the variable is to compensate for the funkiness in the bashism
+	backup_file=${backup_file:-"/tmp/ip6tables-carbfw-$(date +%s).bak"}
+	if $( ip6tables-save > ${backup_file} )
+	then 
+		echo "ip6tables backup file saved to: ${backup_file}" >&2 
+	else
+		echo "!!! ip6tables-save > ${backup_file} BACKUP FAILED !!!" >&2
+	fi
+}    
+
+#ZoneAttr: Set or get attributes related to a given zone.
+ZoneAttr () {
+    local zone=$1
+    shift
+    local attri=$1
+    shift
+    if [ "$1" = "" ]
+        eval echo \$\{${zone}_${attri}\}
+    else
+        eval ${zone}_${attri}="$1" 
+    fi
+}
+
+#ProcessSet: function to process SET lines from the config
+ProcessSet () {
+    if [ $1 = "set" ]; then 
+        shift
+        case $1 in 
+            backup) shift
+                    $backup_file=$1
+            ;;
+            *)      ErrCont "--- set \"$1\" does not exist ---" 
+            ;;
+        esac
+    else
+        ErrQuit "!!! You really shouldn't be getting to the else clause of ProcessSet() !!!" 254
+    fi
+}
+
+#ProcessZone: function to process ZONE rules from the config
+ProcessZone () { 
+    local zname
+    if [ "$1" = "zone" ] ; then
+        shift
+        zname=$(LowerCase $(CleanString $1))
+        if [ "${zname}" = "" ] ; then return; fi
+        if [ ! $( for pzz in ${zones}; do if [ "${pzz}" = "${zname}" ]; then echo ${pzz}; fi; done) ] ; then 
+            zones="${zones} ${zname}" 
+            ErrCont "--- New zone \"$zname\" added to zonelist " 
+        fi
+        shift
+        while [ "$1" != "" ] ; do
+            case $1 in
+                fwd|host)   if [ $(ZoneAttr ${zname} "type") = "" ]; then 
+                               ZoneAttr ${zname} "type" $1 
+                            else
+                                ErrCont "! Zone ${zname} already has type $(ZoneAttr ${zname} \'type\') !"
+                            fi
+                ;;
+                inf)    shift
+                        ZoneAttr "$zname" "interfaces" "$(ZoneAttr $zname interfaces) $(CleanString $1)"
+                ;;
+                policyin)   shift
+                            for izonepolin in $validTargets 
+                            do
+                                if [ "$(UpperCase $1)" = "$izonepolin" ] ; then
+                                    ZoneAttr $zname "polin" $(UpperCase $1) 
+                                fi
+                            done
+                ;;
+                policyout)  shift
+                            for izonepolout in $validTargets
+                            do
+                                if [ "$(UpperCase $1)"  = "$izonepolout" ] ; then
+                                    ZoneAttr $zone "polout" $(UpperCase $1) 
+                                fi
+                            done
+                ;;
+            esac
+        done
+    fi
+}
+
+#ProcessRule: function to process RULE lines from the config
+ProcessRule () {
+}
+
+#ProcessRaw: function that strips off the prefix and runs the command in eval
+ProcessRaw () {
+    eval ${*%%raw }
+}
+
 ## Flag parsing
 # Using the standard getopts function available in both bash and ash.
-while getopts "h" getoptsflag
+while getopts "hbf:" getoptsflag
 do
 	case $getoptsflag in
 		h) 	PrintUsage
 			exit 0
 			;;
+        f)  fval=$OPTARG 
+            ;;
+        b)  bflag=1
+            ;;
+        M)  Mflag=1 #disable mobile IPv6 rules
+            ;;
+        H)  Hflag=1 #disable host IPv6 section
+            ;;
+        F)  Fflag=1 #disable forwarding IPv6 section
 		?)	printf "Error: unknown option %s\n\n" $getoptsflag
 			PrintUsage
 			exit 2
 			;;
 	esac
 done
+if [ -n $fval ] 
+then
+    if [ -f $fval ]
+    then
+        #exec $rulefile< $fval
+        ;;
+    else
+        ErrQuit "!!! Input file does not exist or is not a regular file !!!" 2
+    fi
+fi
+    
 
 ##
 #  INPUT
@@ -83,32 +242,62 @@ done
 #              allow publicly important types
 #              log the rest
 
+## first read settings from the rules file.
+
+## Read rules
+# First we process the SET lines, if any ZONE or RULE lines are encountered then we break out
+while read currrule <&$rulefile
+do
+    currrule=$(Lowercase ${currrule%%#*})
+    printf "\"%s\"\n" "${currrule}"
+    case ${currrule} in
+        set\ *) ProcessSet ${currrule}
+        ;;
+        raw\ *) break
+        ;;
+        zone\ *) break 
+        ;;
+        rule\ *) break
+        ;;
+        "") echo "Empty Line" 
+        ;;
+        *)  ErrQuit "!!! Invalid line \"${currrule}\"; please correct this !!!"  4
+        ;;
+    esac
+done
+
 ## Backup
 #before we flush the tables maybe we want to back up the current tables
-if [[ $backup == 1 ]] 
+if [ -n $backup_flg ] || [ -n $backup_set ] 
 then 
-	#This line of saving the variable is to compensate for the funkiness in the bashism
-	backup_file=${backup_file:="/tmp/ip6tables-carbfw-$(date +%s).bak"}
-	if $( ip6tables-save > ${backup_file} )
-	then 
-		echo "ip6tables backup file saved to: ${backup_file}"
-	else
-		echo "!!! ip6tables-save > ${backup_file} BACKUP FAILED !!!"
-	fi
+    $(Backup)
 fi
 
-## Flush
-#Clean out the tables
-if [[ "$flush" == 1 ]]
-then
-	$ip6t -F
-	$ip6t -X
-fi
+
+while read $currrule <&$rulefile
+do
+    currrule=$(Lowercase ${currrule%%#*})
+    printf "\"%s\"\n" "${currrule}"
+    case ${currrule} in
+        set\ *) ErrCont "!!! Set line used after zones and rules have started. Set lines must come first in the file !!!" 3
+        ;;
+        zone\ *) ProcessZone ${currrule}
+        ;;
+        rule\ *) ProcessRule ${currrule}
+        ;;
+        raw\ *) ProcessRaw ${currrule}
+        ;;
+        "") echo "Empty Line" 
+        ;;
+        *)  ErrQuit "!!! Invalid line \"${currrule}\"; please correct this !!!"  4
+        ;;
+    esac
+done
 
 #Policy Descisions.
 $ip6t -P INPUT DROP
 $ip6t -P FORWARD DROP
-$ip6t -P OUTPUT ACCEPT
+$ip6t -P OUTPUT DROP
 
 #Start with the basic tables;
 if $( $ip6t -N LOGDROP )
@@ -135,7 +324,7 @@ then
 		$ip6t -A ICMP -p icmpv6 --icmpv6-type $icmptype -m limit --limit 100/minute --limit-burst 300 -j ACCEPT
 	done
     
-	if [[ $mobile == 1 ]]
+	if [ $mobile = 1 ]
 	then
 		## Allow the mobileIPv6 configuration types
 		#this covers ICMP Mobile Prefix solicitiation,
@@ -181,18 +370,18 @@ then
 else
 	echo "Building TCP and UDP tables..."  
 	#first the public ones
-	for port in ${publicPorts[*]}
+	for port in ${publicPorts}
 	do
-		if ! [[ $port =~ $regex_port ]]
+		if ! [ ${port%%\/*} ]
 		then 
 			echo "!! Formatting problem with port pair $port. Skipping. !!" >&2
 		else
-			case ${port/*\//} in
+			case ${port##*\/} in
 				tcp)
-					$ip6t -A TCP -p tcp --dport ${port/\/*/} -j ACCEPT
+					$ip6t -A TCP -p tcp --dport ${port%%\/*} -j ACCEPT
 					;;
 				udp)
-					$ip6t -A UDP -p udp --dport ${port/\/*/} -j ACCEPT
+					$ip6t -A UDP -p udp --dport ${port%%\/*} -j ACCEPT
 					;;
 				?) 
 					echo "!!! ERROR: Unknown or invalid protocol specified !!!" \
@@ -306,4 +495,5 @@ then
 #        systrl -e "net.ipv6.conf.$intf.forwarding"="1"
 #    }
 fi
+
 
